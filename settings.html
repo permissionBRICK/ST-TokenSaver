@@ -1,0 +1,28 @@
+<div id="keepalive_settings">
+    <div class="inline-drawer">
+        <div class="inline-drawer-toggle inline-drawer-header">
+            <b data-i18n="ext_keepalive_title">Cache Keepalive</b>
+            <div class="inline-drawer-icon fa-solid fa-circle-chevron-down down"></div>
+        </div>
+        <div class="inline-drawer-content">
+            <label class="checkbox_label" for="keepalive_enabled">
+                <input id="keepalive_enabled" type="checkbox" />
+                <span data-i18n="ext_keepalive_enable">Enable cache keepalive (master switch)</span>
+            </label>
+
+            <label for="keepalive_timeout" data-i18n="ext_keepalive_timeout">Idle timeout (seconds)</label>
+            <input id="keepalive_timeout" class="text_pole" type="number" min="60" step="1" />
+
+            <label for="keepalive_message" data-i18n="ext_keepalive_message">Keepalive message</label>
+            <input id="keepalive_message" class="text_pole" type="text" />
+
+            <small data-i18n="ext_keepalive_help">After this many seconds without activity on the active connection profile, the current chat plus this message (sent as a hidden user message) is submitted to that profile to keep its server-side prompt cache warm. The completion is capped to a single token and is never saved to the chat. The server owns the keepalive timer, while this tab renews its lease every 20 seconds; if the tab sleeps or closes, the server continues on schedule for up to five minutes after the last heartbeat. Waking a tab after both its lease and cache window have expired does not restart keepalives until a new message, regenerate, swipe, or continue. Only the profile you're currently using is pinged. Merely opening, switching to, or reloading a chat is not proof its prompt is cached.</small>
+
+            <hr>
+
+            <label data-i18n="ext_keepalive_profiles_label">Keepalive per connection profile</label>
+            <small data-i18n="ext_keepalive_profiles_desc">Turn keepalive on only for the profiles whose providers support prompt caching (leave the others off so you don't waste requests). The master switch above must be enabled. Profiles default to on.</small>
+            <div id="keepalive_profiles_list" class="keepalive_profiles_list"></div>
+        </div>
+    </div>
+</div>
