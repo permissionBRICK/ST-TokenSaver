@@ -2,9 +2,9 @@
 
 Pins each OpenRouter chat to a stable session, enables a server-timed one-token keepalive roughly every five minutes, and documents SillyTavern's Anthropic prompt-cache settings so all three cost-saving layers work together.
 
-After a successful chat generation, the UI extension prepares a hidden depth-0 user-message request with the same chat context. A small SillyTavern server plugin owns the timer, so background-tab throttling does not make the request late. The browser renews a five-minute lease; closing the tab naturally retires its job.
+The backend keeps a timer after every successful chat, and if no new message has been sent after the interval, it automatically sends a request to the API capped at max 1 token, just enough to refresh the cache timer for the price of your input tokens at reduced cache prices, plus 1 output token, meaning you only pay 10% on your next message instead of the full input token price.
 
-For OpenRouter, the UI also hashes SillyTavern's local chat ID into a stable `session_id`. This makes OpenRouter keep that conversation on the same provider endpoint from its first successful request, and re-use the same input token cache every time. SillyTavern 1.18 does not forward this field, so the repository includes a minimal, auditable one-block server integration.
+It also includes a one-line server patch that couldn't be made into a plugin which makes SillyTavern include a session ID with OpenRouter requests, which pins every chat to a specific provider, allowing you to maximize input token cache hits.
 
 ## Install
 
@@ -51,26 +51,31 @@ This single repository is intentionally installed in both supported SillyTavern 
      -t sillytavern-token-saver:1.18.0 plugins/ST-TokenSaver
    ```
 
-5. Enable **Token Saver** in extension settings. Leave **Pin each OpenRouter chat** enabled and use a 295-second interval for the default five-minute cache. Every connection profile defaults to keepalive on; use the per-profile selector only to opt out when you know a profile cannot benefit or you do not want its extra one-token requests.
+5. Enable **Token Saver** in extension settings. Leave **Pin each OpenRouter chat** enabled and use a 280-second interval for the default five-minute cache. Every connection profile defaults to keepalive on; use the per-profile selector only to opt out when you know a profile cannot benefit or you do not want its extra one-token requests.
 
 Requires SillyTavern 1.18.0+. Server plugins are trusted code with filesystem access; review `server/index.mjs` before enabling it.
 
 ## Short OpenRouter cost recipe
 
-Set `claude.enableSystemPromptCache: true`, `claude.cachingAtDepth: 0`, and `claude.extendedTTL: false`; install/check the bundled OpenRouter session integration; then enable 295-second keepalives (profiles default to on). Avoid a manual OpenRouter `provider.order` when you want sticky routing, because explicit provider ordering takes precedence over session stickiness.
+In your SillyTavern config.yaml, set `claude.enableSystemPromptCache: true`, `claude.cachingAtDepth: 0`, and `claude.extendedTTL: false`; install/check the bundled OpenRouter session integration; then enable 295-second keepalives (profiles default to on). Avoid a manual OpenRouter `provider.order` when you want sticky routing, because explicit provider ordering takes precedence over session stickiness.
 
 OpenRouter does not provide a dependable profile-level yes/no signal for this toggle: cache behavior and lifetime can vary by the endpoint ultimately selected by the router. Token Saver therefore does not guess from model metadata.
+
+## How this actually saves you money
+
+If you usually reply at least once every five minutes in every thread, this plugin does nothing and costs nothing. If you sometimes wait longer than five minutes between messages for some chats (if you have several open at once), your first message would have to re-load the input without cache, and you'd pay full price. In this case, the extension would send an empty request just before expiry, costing only 10% of that full price, and your actual message some minutes later would then also only cost 10%, meaning you saved up to 80% in cost for that initial request after the pause.
+
+Just mathematically, as long as your pauses are between 5 and 40 minutes, this plugin still saves you money compared to just paying the full fee. between 40 and 60 (if consistent), you'd likly be cheaper off with the long-cache option where input tokens cost twice as much. Above 60 min, you're definitely cheaper off by just letting it decay and then paying full price.
+
+If you want to optimize, try to find the sweetspot you can set the keepalive at just below 300, that still makes openrouter show the cached input tokens in the logs with every request using anthropic (some of the most aggressive ones in terms of cache, also the most expensive). Usually, somewhere between 270-290 works consistently for me.
 
 ## Safety and cost behavior
 
 - Completions are non-streaming and capped to one token.
-- OpenRouter session IDs are deterministic hashes of local chat IDs, never chat names or contents.
 - Jobs are user- and tab-scoped, pause during foreground inference, and are removed when the browser lease expires.
 - Opening a chat alone never arms a keepalive; a real chat generation must occur first.
 - No API keys or secrets are stored. The server replays the authenticated request only to SillyTavern’s own loopback endpoint.
 - The integration supplies a sticky-session key but does not force a named provider; OpenRouter can still fail over when its sticky provider is unavailable.
-
-The exact savings depend on provider cache pricing, context size, and whether requests remain cache-compatible; “90%” is possible for large cached prompts but is not guaranteed.
 
 ## Development
 
