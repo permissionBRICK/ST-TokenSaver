@@ -53,7 +53,7 @@ This single repository is intentionally installed in both supported SillyTavern 
 
 5. Enable **Token Saver** in extension settings. Leave **Pin each OpenRouter chat** enabled and use a 280-second interval for the default five-minute cache. Every connection profile defaults to keepalive on; use the per-profile selector only to opt out when you know a profile cannot benefit or you do not want its extra one-token requests.
 
-Requires SillyTavern 1.18.0+. Server plugins are trusted code with filesystem access; review `server/index.mjs` before enabling it.
+Requires SillyTavern 1.18.0+.
 
 ## How this actually saves you money
 
