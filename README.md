@@ -63,11 +63,13 @@ OpenRouter does not provide a dependable profile-level yes/no signal for this to
 
 ## How this actually saves you money
 
-If you usually reply at least once every five minutes in every thread, this plugin does nothing and costs nothing. If you sometimes wait longer than five minutes between messages for some chats (if you have several open at once), your first message would have to re-load the input without cache, and you'd pay full price. In this case, the extension would send an empty request just before expiry, costing only 10% of that full price, and your actual message some minutes later would then also only cost 10%, meaning you saved up to 80% in cost for that initial request after the pause.
+If you usually reply at least once every five minutes in every thread, the keepalive does nothing and costs nothing. If you sometimes wait longer than five minutes between messages for some chats (if you have several open at once), your first message would have to re-load the input without cache, and you'd pay full price. In this case, the extension would send an empty request just before expiry, costing only 10% of that full price, and your actual message some minutes later would then also only cost 10%, meaning you saved up to 80% in cost for that initial request after the pause.
 
 Just mathematically, as long as your pauses are between 5 and 40 minutes, this plugin still saves you money compared to just paying the full fee. between 40 and 60 (if consistent), you'd likly be cheaper off with the long-cache option where input tokens cost twice as much. Above 60 min, you're definitely cheaper off by just letting it decay and then paying full price.
 
 If you want to optimize, try to find the sweetspot you can set the keepalive at just below 300, that still makes openrouter show the cached input tokens in the logs with every request using anthropic (some of the most aggressive ones in terms of cache, also the most expensive). Usually, somewhere between 270-290 works consistently for me.
+
+Aside from that, if you are using Models that have more than one provider, the session id pinning helps in avoiding cache misses by in theory stopping openrouter from randomly switching providers mid-session (independantly of how often you send messages), so this alone also helps reduce costs there.
 
 ## Safety and cost behavior
 
