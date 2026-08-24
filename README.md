@@ -27,7 +27,7 @@ This single repository is intentionally installed in both supported SillyTavern 
      extendedTTL: false
    ```
 
-   These cache settings are built into SillyTavern and apply to direct Anthropic requests and supported Claude models through OpenRouter. `extendedTTL: false` uses the five-minute cache; set it to `true` only when the one-hour cache's higher write price fits your usage.
+   These cache settings are built into SillyTavern and apply to direct Anthropic requests and supported Claude models through OpenRouter. The point is to enable input token caching at all (most of all providers have it enabled by default).
 
 3. From the SillyTavern directory, install the same repository as a server plugin and restart:
 
