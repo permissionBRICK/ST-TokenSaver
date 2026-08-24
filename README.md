@@ -4,7 +4,7 @@ Pins each OpenRouter chat to a stable session, enables a server-timed one-token 
 
 After a successful chat generation, the UI extension prepares a hidden depth-0 user-message request with the same chat context. A small SillyTavern server plugin owns the timer, so background-tab throttling does not make the request late. The browser renews a five-minute lease; closing the tab naturally retires its job.
 
-For OpenRouter, the UI also hashes SillyTavern's local chat ID into a stable `session_id`. This avoids exposing a chat filename while letting OpenRouter keep that conversation on the same provider endpoint from its first successful request. SillyTavern 1.18 does not forward this field, so the repository includes a minimal, auditable one-block server integration.
+For OpenRouter, the UI also hashes SillyTavern's local chat ID into a stable `session_id`. This makes OpenRouter keep that conversation on the same provider endpoint from its first successful request, and re-use the same input token cache every time. SillyTavern 1.18 does not forward this field, so the repository includes a minimal, auditable one-block server integration.
 
 ## Install
 
