@@ -5,6 +5,7 @@ import {
     event_types,
     extension_prompt_roles,
     extension_prompt_types,
+    getCurrentChatId,
     getGenerateUrl,
     getRequestHeaders,
     isGenerating,
@@ -14,7 +15,7 @@ import {
 } from '../../../../script.js';
 import { createGenerationParameters, getChatCompletionModel, oai_settings } from '../../../openai.js';
 import { horde_settings } from '../../../horde.js';
-import { uuidv4 } from '../../../utils.js';
+import { getStringHash, uuidv4 } from '../../../utils.js';
 
 export { init };
 
@@ -43,6 +44,7 @@ const NONE_KEY = '__none__';
 
 const defaultSettings = {
     enabled: false,
+    openRouterSessionIds: true,
     timeoutSeconds: 295,
     message: '[Note: just reply with an empty response to keep the session alive]',
     // Per-profile enable map: { [profileId]: boolean }. Unlisted profiles default to enabled.
@@ -112,6 +114,38 @@ function updateLastKeepalive(profileKey, value) {
     const timestamp = Number(value);
     if (Number.isFinite(timestamp) && timestamp > 0) {
         lastKeepalive[profileKey] = Math.max(lastKeepalive[profileKey] || 0, timestamp);
+    }
+}
+
+/**
+ * Adds a privacy-preserving, stable per-chat OpenRouter session key before the
+ * request is sent to SillyTavern's backend. The bundled server integration
+ * forwards this top-level value to OpenRouter.
+ * @param {object} generateData Mutable chat-completion request payload.
+ */
+function addOpenRouterSessionId(generateData) {
+    if (!extension_settings[MODULE]?.openRouterSessionIds || oai_settings.chat_completion_source !== 'openrouter') {
+        return;
+    }
+
+    const chatId = getCurrentChatId();
+    if (chatId) {
+        generateData.session_id = `st-${getStringHash(chatId)}`;
+    }
+}
+
+async function updateOpenRouterIntegrationStatus() {
+    const status = $('#keepalive_openrouter_status');
+    try {
+        const response = await fetch('/api/plugins/token-saver/capabilities', { headers: getRequestHeaders() });
+        const capabilities = await response.json();
+        status.text(capabilities.openRouterSessionForwarding
+            ? 'OpenRouter per-chat session forwarding is active.'
+            : 'OpenRouter session IDs are generated, but server forwarding is not installed. See the README.');
+        status.toggleClass('warning', !capabilities.openRouterSessionForwarding);
+    } catch {
+        status.text('Could not verify the Token Saver server integration.');
+        status.addClass('warning');
     }
 }
 
@@ -466,6 +500,7 @@ function loadSettings() {
     }
 
     $('#keepalive_enabled').prop('checked', extension_settings[MODULE].enabled);
+    $('#keepalive_openrouter_session_ids').prop('checked', extension_settings[MODULE].openRouterSessionIds);
     $('#keepalive_timeout').val(extension_settings[MODULE].timeoutSeconds);
     $('#keepalive_message').val(extension_settings[MODULE].message);
     renderProfileToggles();
@@ -475,6 +510,11 @@ function loadSettings() {
  * Wires up the settings UI control handlers.
  */
 function setupListeners() {
+    $('#keepalive_openrouter_session_ids').on('change', function () {
+        extension_settings[MODULE].openRouterSessionIds = !!$(this).prop('checked');
+        saveSettingsDebounced();
+    });
+
     $('#keepalive_enabled').on('change', function () {
         extension_settings[MODULE].enabled = !!$(this).prop('checked');
         saveSettingsDebounced();
@@ -658,6 +698,7 @@ async function init() {
     // refresh the stored request so the server replays the latest prompt without pretending that
     // those edits refreshed the provider cache.
     eventSource.on(event_types.GENERATION_STARTED, onGenerationStarted);
+    eventSource.on(event_types.CHAT_COMPLETION_SETTINGS_READY, addOpenRouterSessionId);
     eventSource.on(event_types.MESSAGE_RECEIVED, onMessageReceived);
     eventSource.on(event_types.GENERATION_STOPPED, () => void finishForegroundRequest(false));
     eventSource.on(event_types.MESSAGE_EDITED, onChatContentChanged);
@@ -682,4 +723,6 @@ async function init() {
     eventSource.on(event_types.CONNECTION_PROFILE_CREATED, renderProfileToggles);
     eventSource.on(event_types.CONNECTION_PROFILE_UPDATED, renderProfileToggles);
     eventSource.on(event_types.CONNECTION_PROFILE_DELETED, renderProfileToggles);
+
+    void updateOpenRouterIntegrationStatus();
 }

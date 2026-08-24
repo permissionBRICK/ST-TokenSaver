@@ -10,6 +10,12 @@
                 <span data-i18n="ext_keepalive_enable">Enable cache keepalive (master switch)</span>
             </label>
 
+            <label class="checkbox_label" for="keepalive_openrouter_session_ids">
+                <input id="keepalive_openrouter_session_ids" type="checkbox" />
+                <span>Pin each OpenRouter chat with a stable session ID</span>
+            </label>
+            <small id="keepalive_openrouter_status">Checking OpenRouter server integration…</small>
+
             <label for="keepalive_timeout" data-i18n="ext_keepalive_timeout">Idle timeout (seconds)</label>
             <input id="keepalive_timeout" class="text_pole" type="number" min="60" step="1" />
 

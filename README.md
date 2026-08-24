@@ -1,8 +1,10 @@
 # ST-TokenSaver
 
-Keeps provider-side prompt caches warm for inactive SillyTavern tabs with a one-token completion roughly every five minutes.
+Pins each OpenRouter chat to a stable session, enables a server-timed one-token keepalive roughly every five minutes, and documents SillyTavern's Anthropic prompt-cache settings so all three cost-saving layers work together.
 
 After a successful chat generation, the UI extension prepares a hidden depth-0 user-message request with the same chat context. A small SillyTavern server plugin owns the timer, so background-tab throttling does not make the request late. The browser renews a five-minute lease; closing the tab naturally retires its job.
+
+For OpenRouter, the UI also hashes SillyTavern's local chat ID into a stable `session_id`. This avoids exposing a chat filename while letting OpenRouter keep that conversation on the same provider endpoint from its first successful request. SillyTavern 1.18 does not forward this field, so the repository includes a minimal, auditable one-block server integration.
 
 ## Install
 
@@ -14,11 +16,18 @@ This single repository is intentionally installed in both supported SillyTavern 
    https://github.com/permissionBRICK/ST-TokenSaver
    ```
 
-2. Enable server plugins in `config.yaml`:
+2. Enable server plugins and Anthropic prompt caching in `config.yaml`:
 
    ```yaml
    enableServerPlugins: true
+
+   claude:
+     enableSystemPromptCache: true
+     cachingAtDepth: 0
+     extendedTTL: false
    ```
+
+   These cache settings are built into SillyTavern and apply to direct Anthropic requests and supported Claude models through OpenRouter. `extendedTTL: false` uses the five-minute cache; set it to `true` only when the one-hour cache's higher write price fits your usage.
 
 3. From the SillyTavern directory, install the same repository as a server plugin and restart:
 
@@ -26,17 +35,38 @@ This single repository is intentionally installed in both supported SillyTavern 
    node plugins.js install https://github.com/permissionBRICK/ST-TokenSaver
    ```
 
-4. Enable **Token Saver** in extension settings. The default interval is 295 seconds; profiles can be enabled individually.
+4. Install the OpenRouter forwarding integration from the SillyTavern directory, then restart:
+
+   ```bash
+   node plugins/ST-TokenSaver/scripts/openrouter-session-integration.mjs apply .
+   node plugins/ST-TokenSaver/scripts/openrouter-session-integration.mjs check .
+   ```
+
+   The installer is idempotent, refuses unknown source layouts, and writes a `.token-saver.bak` backup. A SillyTavern update can replace the integration, so rerun `check` afterward. To remove it, use `revert` instead of `apply`.
+
+   For immutable Docker installs, build the included minimal derivative instead of editing a running container:
+
+   ```bash
+   docker build -f plugins/ST-TokenSaver/Dockerfile.integration \
+     -t sillytavern-token-saver:1.18.0 plugins/ST-TokenSaver
+   ```
+
+5. Enable **Token Saver** in extension settings. Leave **Pin each OpenRouter chat** enabled, use a 295-second interval for the default five-minute cache, and disable keepalives for profiles whose providers do not support prompt caching.
 
 Requires SillyTavern 1.18.0+. Server plugins are trusted code with filesystem access; review `server/index.mjs` before enabling it.
+
+## Short OpenRouter cost recipe
+
+Set `claude.enableSystemPromptCache: true`, `claude.cachingAtDepth: 0`, and `claude.extendedTTL: false`; install/check the bundled OpenRouter session integration; then enable 295-second keepalives only on cache-capable profiles. Avoid a manual OpenRouter `provider.order` when you want sticky routing, because explicit provider ordering takes precedence over session stickiness.
 
 ## Safety and cost behavior
 
 - Completions are non-streaming and capped to one token.
+- OpenRouter session IDs are deterministic hashes of local chat IDs, never chat names or contents.
 - Jobs are user- and tab-scoped, pause during foreground inference, and are removed when the browser lease expires.
 - Opening a chat alone never arms a keepalive; a real chat generation must occur first.
 - No API keys or secrets are stored. The server replays the authenticated request only to SillyTavern’s own loopback endpoint.
-- This extension does not override provider selection. OpenRouter provider affinity remains governed by SillyTavern/OpenRouter settings.
+- The integration supplies a sticky-session key but does not force a named provider; OpenRouter can still fail over when its sticky provider is unavailable.
 
 The exact savings depend on provider cache pricing, context size, and whether requests remain cache-compatible; “90%” is possible for large cached prompts but is not guaranteed.
 

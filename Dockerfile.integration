@@ -1,0 +1,9 @@
+ARG SILLYTAVERN_VERSION=1.18.0
+FROM ghcr.io/sillytavern/sillytavern:${SILLYTAVERN_VERSION}
+
+COPY --chown=node:node scripts/openrouter-session-integration.mjs /tmp/openrouter-session-integration.mjs
+RUN node /tmp/openrouter-session-integration.mjs apply /home/node/app --no-backup \
+    && rm /tmp/openrouter-session-integration.mjs
+
+LABEL org.opencontainers.image.source="https://github.com/permissionBRICK/ST-TokenSaver"
+LABEL org.opencontainers.image.description="Official SillyTavern image with the minimal ST-TokenSaver OpenRouter session forwarding integration"

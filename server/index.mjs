@@ -1,8 +1,20 @@
 import express from 'express';
+import fs from 'node:fs';
 import https from 'node:https';
+import path from 'node:path';
 import fetch from 'node-fetch';
 
 const apiRouter = express.Router();
+const OPENROUTER_FORWARDING_MARKER = "bodyParams['session_id'] = request.body.session_id";
+
+export function hasOpenRouterSessionForwarding(root = process.cwd()) {
+    try {
+        const backend = path.join(root, 'src/endpoints/backends/chat-completions.js');
+        return fs.readFileSync(backend, 'utf8').includes(OPENROUTER_FORWARDING_MARKER);
+    } catch {
+        return false;
+    }
+}
 
 export const FRONTEND_LEASE_MS = 5 * 60 * 1000;
 const MIN_INTERVAL_MS = 60 * 1000;
@@ -385,8 +397,17 @@ apiRouter.post('/stop', (request, response) => {
     }
 });
 
+apiRouter.get('/capabilities', (_request, response) => {
+    return response.send({
+        openRouterSessionForwarding: hasOpenRouterSessionForwarding(),
+    });
+});
+
 export async function init(router) {
     router.use(apiRouter);
+    if (!hasOpenRouterSessionForwarding()) {
+        console.warn('[Token Saver] OpenRouter session IDs require the bundled server integration. See the ST-TokenSaver README.');
+    }
 }
 
 export const info = {

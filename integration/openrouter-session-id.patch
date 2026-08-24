@@ -1,0 +1,17 @@
+diff --git a/src/endpoints/backends/chat-completions.js b/src/endpoints/backends/chat-completions.js
+--- a/src/endpoints/backends/chat-completions.js
++++ b/src/endpoints/backends/chat-completions.js
+@@
+             bodyParams = {
+                 transforms: getOpenRouterTransforms(request),
+                 plugins: getOpenRouterPlugins(request),
+                 reasoning: {
+                     exclude: !includeReasoning,
+                 },
+             };
+ 
++            if (typeof request.body.session_id === 'string' && request.body.session_id.length <= 256) {
++                bodyParams['session_id'] = request.body.session_id;
++            }
++
+             if (request.body.min_p !== undefined) {
