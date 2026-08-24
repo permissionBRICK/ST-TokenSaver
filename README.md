@@ -51,13 +51,15 @@ This single repository is intentionally installed in both supported SillyTavern 
      -t sillytavern-token-saver:1.18.0 plugins/ST-TokenSaver
    ```
 
-5. Enable **Token Saver** in extension settings. Leave **Pin each OpenRouter chat** enabled, use a 295-second interval for the default five-minute cache, and disable keepalives for profiles whose providers do not support prompt caching.
+5. Enable **Token Saver** in extension settings. Leave **Pin each OpenRouter chat** enabled and use a 295-second interval for the default five-minute cache. Every connection profile defaults to keepalive on; use the per-profile selector only to opt out when you know a profile cannot benefit or you do not want its extra one-token requests.
 
 Requires SillyTavern 1.18.0+. Server plugins are trusted code with filesystem access; review `server/index.mjs` before enabling it.
 
 ## Short OpenRouter cost recipe
 
-Set `claude.enableSystemPromptCache: true`, `claude.cachingAtDepth: 0`, and `claude.extendedTTL: false`; install/check the bundled OpenRouter session integration; then enable 295-second keepalives only on cache-capable profiles. Avoid a manual OpenRouter `provider.order` when you want sticky routing, because explicit provider ordering takes precedence over session stickiness.
+Set `claude.enableSystemPromptCache: true`, `claude.cachingAtDepth: 0`, and `claude.extendedTTL: false`; install/check the bundled OpenRouter session integration; then enable 295-second keepalives (profiles default to on). Avoid a manual OpenRouter `provider.order` when you want sticky routing, because explicit provider ordering takes precedence over session stickiness.
+
+OpenRouter does not provide a dependable profile-level yes/no signal for this toggle: cache behavior and lifetime can vary by the endpoint ultimately selected by the router. Token Saver therefore does not guess from model metadata.
 
 ## Safety and cost behavior
 

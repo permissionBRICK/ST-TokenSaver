@@ -27,7 +27,7 @@
             <hr>
 
             <label data-i18n="ext_keepalive_profiles_label">Keepalive per connection profile</label>
-            <small data-i18n="ext_keepalive_profiles_desc">Turn keepalive on only for the profiles whose providers support prompt caching (leave the others off so you don't waste requests). The master switch above must be enabled. Profiles default to on.</small>
+            <small data-i18n="ext_keepalive_profiles_desc">Profiles default to on because OpenRouter cannot reliably expose cache behavior for the endpoint it will ultimately select. Opt out only when you know a profile cannot benefit or you do not want its extra one-token requests. The master switch above must be enabled.</small>
             <div id="keepalive_profiles_list" class="keepalive_profiles_list"></div>
         </div>
     </div>
