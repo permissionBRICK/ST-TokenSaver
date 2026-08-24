@@ -4,7 +4,7 @@ Pins each OpenRouter chat to a stable session, enables a server-timed one-token 
 
 The backend keeps a timer after every successful chat, and if no new message has been sent after the interval, it automatically sends a request to the API capped at max 1 token, just enough to refresh the cache timer for the price of your input tokens at reduced cache prices, plus 1 output token, meaning you only pay 10% on your next message instead of the full input token price.
 
-It also includes a one-line server patch that couldn't be made into a plugin which makes SillyTavern include a session ID with OpenRouter requests, which pins every chat to a specific provider, allowing you to maximize input token cache hits.
+For OpenRouter, the UI also hashes SillyTavern's local chat ID into a stable `session_id`. This avoids exposing a chat filename while letting OpenRouter keep that conversation on the same provider endpoint from its first successful request. SillyTavern 1.18 does not forward this field, so the server plugin automatically installs a minimal, auditable one-block integration at startup.
 
 ## Install
 
@@ -35,21 +35,16 @@ This single repository is intentionally installed in both supported SillyTavern 
    node plugins.js install https://github.com/permissionBRICK/ST-TokenSaver
    ```
 
-4. Install the OpenRouter forwarding integration from the SillyTavern directory, then restart:
+4. For Docker, the server plugin checks and installs OpenRouter session forwarding automatically. SillyTavern imports its backend routes before plugins, so the first container startup after installation or an upstream overwrite exits once with code 75; the container's normal restart policy immediately starts it again with the integration active. No custom Docker image is required.
+
+   For a non-Docker install, run the explicit `apply` command before starting SillyTavern. The same script provides `check` and `revert` commands for auditing and recovery:
 
    ```bash
    node plugins/ST-TokenSaver/scripts/openrouter-session-integration.mjs apply .
    node plugins/ST-TokenSaver/scripts/openrouter-session-integration.mjs check .
    ```
 
-   The installer is idempotent, refuses unknown source layouts, and writes a `.token-saver.bak` backup. A SillyTavern update can replace the integration, so rerun `check` afterward. To remove it, use `revert` instead of `apply`.
-
-   For immutable Docker installs, build the included minimal derivative instead of editing a running container:
-
-   ```bash
-   docker build -f plugins/ST-TokenSaver/Dockerfile.integration \
-     -t sillytavern-token-saver:1.18.0 plugins/ST-TokenSaver
-   ```
+   The installer is idempotent, refuses unknown source layouts, writes atomically, and keeps a `.token-saver.bak` backup. Set `TOKEN_SAVER_AUTO_PATCH=false` to disable Docker automatic installation or `TOKEN_SAVER_AUTO_RESTART=false` to require a manual Docker restart.
 
 5. Enable **Token Saver** in extension settings. Leave **Pin each OpenRouter chat** enabled and use a 280-second interval for the default five-minute cache. Every connection profile defaults to keepalive on; use the per-profile selector only to opt out when you know a profile cannot benefit or you do not want its extra one-token requests.
 

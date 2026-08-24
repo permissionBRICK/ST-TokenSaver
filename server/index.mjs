@@ -3,9 +3,44 @@ import fs from 'node:fs';
 import https from 'node:https';
 import path from 'node:path';
 import fetch from 'node-fetch';
+import { installForwarding } from '../scripts/openrouter-session-integration.mjs';
 
 const apiRouter = express.Router();
 const OPENROUTER_FORWARDING_MARKER = "bodyParams['session_id'] = request.body.session_id";
+const AUTO_PATCH_DISABLED = /^(0|false|no)$/i.test(String(process.env.TOKEN_SAVER_AUTO_PATCH ?? ''));
+const AUTO_RESTART_DISABLED = /^(0|false|no)$/i.test(String(process.env.TOKEN_SAVER_AUTO_RESTART ?? ''));
+let openRouterForwardingNeedsRestart = false;
+
+function isContainerRuntime() {
+    if (fs.existsSync('/.dockerenv')) {
+        return true;
+    }
+    try {
+        return /(?:docker|containerd|kubepods)/i.test(fs.readFileSync('/proc/1/cgroup', 'utf8'));
+    } catch {
+        return false;
+    }
+}
+
+/**
+ * Applies the tiny OpenRouter forwarding integration from the installed plugin.
+ * SillyTavern imports its backend routes before server plugins initialize, so a
+ * newly written block becomes active only after one restart.
+ * @param {string} root SillyTavern root.
+ * @returns {{changed: boolean, restartRequired: boolean, error?: Error}}
+ */
+export function autoInstallOpenRouterSessionForwarding(root = process.cwd()) {
+    if (hasOpenRouterSessionForwarding(root) || AUTO_PATCH_DISABLED) {
+        return { changed: false, restartRequired: false };
+    }
+    try {
+        const result = installForwarding(root);
+        openRouterForwardingNeedsRestart = result.changed;
+        return { changed: result.changed, restartRequired: result.changed };
+    } catch (error) {
+        return { changed: false, restartRequired: false, error };
+    }
+}
 
 export function hasOpenRouterSessionForwarding(root = process.cwd()) {
     try {
@@ -399,13 +434,27 @@ apiRouter.post('/stop', (request, response) => {
 
 apiRouter.get('/capabilities', (_request, response) => {
     return response.send({
-        openRouterSessionForwarding: hasOpenRouterSessionForwarding(),
+        openRouterSessionForwarding: hasOpenRouterSessionForwarding() && !openRouterForwardingNeedsRestart,
+        openRouterSessionForwardingInstalled: hasOpenRouterSessionForwarding(),
+        restartRequired: openRouterForwardingNeedsRestart,
     });
 });
 
 export async function init(router) {
     router.use(apiRouter);
-    if (!hasOpenRouterSessionForwarding()) {
+    const containerRuntime = isContainerRuntime();
+    const integration = containerRuntime
+        ? autoInstallOpenRouterSessionForwarding()
+        : { changed: false, restartRequired: false };
+    if (integration.error) {
+        console.error('[Token Saver] Refused or failed to install OpenRouter session forwarding:', integration.error);
+    } else if (integration.restartRequired) {
+        console.warn('[Token Saver] Installed OpenRouter session forwarding. A SillyTavern restart is required before it becomes active.');
+        if (!AUTO_RESTART_DISABLED) {
+            console.warn('[Token Saver] Restarting the container process once to activate the integration.');
+            setTimeout(() => process.exit(75), 1500);
+        }
+    } else if (!hasOpenRouterSessionForwarding()) {
         console.warn('[Token Saver] OpenRouter session IDs require the bundled server integration. See the ST-TokenSaver README.');
     }
 }
