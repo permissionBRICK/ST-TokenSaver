@@ -12,10 +12,12 @@ import {
     main_api,
     saveSettingsDebounced,
     setExtensionPrompt,
+    substituteParams,
 } from '../../../../script.js';
 import { createGenerationParameters, getChatCompletionModel, oai_settings } from '../../../openai.js';
 import { horde_settings } from '../../../horde.js';
 import { getStringHash, uuidv4 } from '../../../utils.js';
+import { squashSystemMessages } from './prompt-shape.js';
 
 export { init };
 
@@ -272,6 +274,25 @@ function capKeepalivePayload(endpoint, payload) {
 }
 
 /**
+ * Gives the keepalive dry run the system-message squashing that SillyTavern applies only to live
+ * requests. Registered as the first prompt-ready listener so later listeners see the squashed
+ * prompt, exactly as they do for a live request.
+ * @param {{chat: object[], dryRun: boolean}} eventData Assembled prompt, modified in place.
+ */
+function squashKeepalivePrompt(eventData) {
+    if (!preparingJob || !eventData?.dryRun || !oai_settings.squash_system_messages || !Array.isArray(eventData.chat)) {
+        return;
+    }
+    const separateContents = [
+        oai_settings.new_chat_prompt,
+        oai_settings.new_group_chat_prompt,
+        oai_settings.new_example_chat_prompt,
+        oai_settings.group_nudge_prompt,
+    ].filter(Boolean).map(prompt => substituteParams(prompt));
+    eventData.chat.splice(0, eventData.chat.length, ...squashSystemMessages(eventData.chat, separateContents));
+}
+
+/**
  * Dry-runs prompt assembly and returns a request the backend can replay later.
  * @returns {Promise<{endpoint: string, payload: object}>}
  */
@@ -288,8 +309,8 @@ async function prepareKeepaliveRequest() {
     eventSource.on(event_types.GENERATE_AFTER_DATA, captureData);
     setExtensionPrompt(KEEPALIVE_INJECT_ID, extension_settings[MODULE].message, extension_prompt_types.IN_CHAT, 0, false, extension_prompt_roles.USER);
     try {
-        // A normal live request applies the user's system-message squashing after prompt assembly.
-        // Opt into the same final transform here so provider cache keys see identical boundaries.
+        // Dry runs skip the user's system-message squashing; squashKeepalivePrompt() applies it so
+        // provider cache keys see the same prompt as a live request.
         await Generate('quiet', { quiet_prompt: '', force_name2: true }, true);
     } finally {
         setExtensionPrompt(KEEPALIVE_INJECT_ID, '', extension_prompt_types.IN_CHAT, 0, false, extension_prompt_roles.USER);
@@ -698,6 +719,7 @@ async function init() {
     // refresh the stored request so the server replays the latest prompt without pretending that
     // those edits refreshed the provider cache.
     eventSource.on(event_types.GENERATION_STARTED, onGenerationStarted);
+    eventSource.makeFirst(event_types.CHAT_COMPLETION_PROMPT_READY, squashKeepalivePrompt);
     eventSource.on(event_types.CHAT_COMPLETION_SETTINGS_READY, addOpenRouterSessionId);
     eventSource.on(event_types.MESSAGE_RECEIVED, onMessageReceived);
     eventSource.on(event_types.GENERATION_STOPPED, () => void finishForegroundRequest(false));
