@@ -14,4 +14,8 @@ diff --git a/src/endpoints/backends/chat-completions.js b/src/endpoints/backends
 +                bodyParams['session_id'] = request.body.session_id;
 +            }
 +
++            if (typeof request.body.prompt_cache_key === 'string' && request.body.prompt_cache_key.length <= 256) {
++                bodyParams['prompt_cache_key'] = request.body.prompt_cache_key;
++            }
++
              if (request.body.min_p !== undefined) {

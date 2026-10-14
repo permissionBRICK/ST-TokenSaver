@@ -3,10 +3,9 @@ import fs from 'node:fs';
 import https from 'node:https';
 import path from 'node:path';
 import fetch from 'node-fetch';
-import { installForwarding } from '../scripts/openrouter-session-integration.mjs';
+import { hasForwarding, installForwarding } from '../scripts/openrouter-session-integration.mjs';
 
 const apiRouter = express.Router();
-const OPENROUTER_FORWARDING_MARKER = "bodyParams['session_id'] = request.body.session_id";
 const AUTO_PATCH_DISABLED = /^(0|false|no)$/i.test(String(process.env.TOKEN_SAVER_AUTO_PATCH ?? ''));
 const AUTO_RESTART_DISABLED = /^(0|false|no)$/i.test(String(process.env.TOKEN_SAVER_AUTO_RESTART ?? ''));
 let openRouterForwardingNeedsRestart = false;
@@ -45,7 +44,7 @@ export function autoInstallOpenRouterSessionForwarding(root = process.cwd()) {
 export function hasOpenRouterSessionForwarding(root = process.cwd()) {
     try {
         const backend = path.join(root, 'src/endpoints/backends/chat-completions.js');
-        return fs.readFileSync(backend, 'utf8').includes(OPENROUTER_FORWARDING_MARKER);
+        return hasForwarding(fs.readFileSync(backend, 'utf8'));
     } catch {
         return false;
     }
@@ -116,6 +115,7 @@ export class KeepaliveScheduler {
             // its state, while preserving an earlier deadline and any foreground-request pause.
             Object.assign(existing, job, {
                 intervalMs,
+                failures: 0,
                 lastSeen: now,
                 nextRun: Math.min(existing.nextRun, requestedNextRun),
             });
@@ -212,6 +212,7 @@ export class KeepaliveScheduler {
             const scheduledRun = job.nextRun;
             job.inFlight = true;
             pending.push(Promise.resolve(this.#dispatch(job)).then(() => {
+                job.failures = 0;
                 const completedAt = this.#now();
                 job.lastRun = completedAt;
                 job.nextRun = advanceDeadline(scheduledRun, job.intervalMs, completedAt);
@@ -220,8 +221,12 @@ export class KeepaliveScheduler {
                     expiredJob.lastRun = completedAt;
                 }
             }).catch(error => {
-                console.debug(`[Keepalive] Backend request failed for ${job.id}:`, error);
-                job.nextRun = this.#now() + FAILED_REQUEST_RETRY_MS;
+                // A provider that rejects the keepalive outright (e.g. an unsupported parameter)
+                // fails the same way every time; back off instead of retrying every few seconds.
+                job.failures = (job.failures || 0) + 1;
+                const retryMs = Math.min(job.intervalMs, FAILED_REQUEST_RETRY_MS * 2 ** (job.failures - 1));
+                console.warn(`[Keepalive] Job ${job.id} failed (attempt ${job.failures}, retry in ${Math.round(retryMs / 1000)}s):`, error?.message || error);
+                job.nextRun = this.#now() + retryMs;
             }).finally(() => {
                 job.inFlight = false;
                 this.#schedule();
@@ -275,6 +280,25 @@ export class KeepaliveScheduler {
     }
 }
 
+/**
+ * Extracts the error that a generation endpoint reported in an otherwise successful response.
+ * @param {string} body Response body.
+ * @returns {string|null} Error message, or null when the response carries no error.
+ */
+export function getResponseError(body) {
+    let data;
+    try {
+        data = JSON.parse(body);
+    } catch {
+        return null;
+    }
+    const error = data?.error;
+    if (!error) {
+        return null;
+    }
+    return typeof error === 'object' ? String(error.message || JSON.stringify(error)) : String(error === true ? 'unknown error' : error);
+}
+
 async function dispatchKeepaliveRequest(job) {
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(new Error('Keepalive request timed out')), 120000);
@@ -288,9 +312,15 @@ async function dispatchKeepaliveRequest(job) {
             signal: controller.signal,
             agent: job.request.secure ? localHttpsAgent : undefined,
         });
-        await response.arrayBuffer();
+        const body = await response.text();
         if (!response.ok) {
             throw new Error(`HTTP ${response.status}`);
+        }
+        // SillyTavern answers provider errors with HTTP 200 and an `error` body. Such a request
+        // never reached the provider's cache, so it must not count as a refresh.
+        const error = getResponseError(body);
+        if (error) {
+            throw new Error(`Provider rejected the keepalive: ${error}`);
         }
         console.info(`[Keepalive] Job ${job.id} completed successfully`);
     } finally {
@@ -462,5 +492,5 @@ export async function init(router) {
 export const info = {
     id: 'token-saver',
     name: 'Token Saver Scheduler',
-    description: 'Schedules one-token prompt-cache keepalive requests while a SillyTavern tab holds a lease.',
+    description: 'Schedules minimal prompt-cache keepalive requests while a SillyTavern tab holds a lease.',
 };

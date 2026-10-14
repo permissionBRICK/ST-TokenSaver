@@ -30,6 +30,9 @@ const TEMPORARY_CONNECTION_ENDED = 'st-token-saver:temporary-connection-ended';
 // still processed by the backend (which is what refreshes the server-side
 // cache), but we never pay for a full completion.
 const KEEPALIVE_RESPONSE_LENGTH = 1;
+// Chat-completion providers built on OpenAI's Responses API (Meta Muse, for one) reject
+// max_output_tokens below 16, so a one-token keepalive never reaches their cache.
+const CHAT_COMPLETION_KEEPALIVE_LENGTH = 16;
 const HEARTBEAT_INTERVAL_MS = 20000;
 const RETRY_INTERVAL_MS = 5000;
 const SETTINGS_REFRESH_DELAY_MS = 300;
@@ -122,7 +125,7 @@ function updateLastKeepalive(profileKey, value) {
 /**
  * Adds a privacy-preserving, stable per-chat OpenRouter session key before the
  * request is sent to SillyTavern's backend. The bundled server integration
- * forwards this top-level value to OpenRouter.
+ * forwards these top-level values to OpenRouter.
  * @param {object} generateData Mutable chat-completion request payload.
  */
 function addOpenRouterSessionId(generateData) {
@@ -133,6 +136,9 @@ function addOpenRouterSessionId(generateData) {
     const chatId = getCurrentChatId();
     if (chatId) {
         generateData.session_id = `st-${getStringHash(chatId)}`;
+        // session_id only pins the provider. Providers with OpenAI-style caching (Meta Muse) spread
+        // requests across replicas unless prompt_cache_key routes the chat to the same cache.
+        generateData.prompt_cache_key = generateData.session_id;
     }
 }
 
@@ -249,23 +255,25 @@ function onChatChanged() {
 }
 
 /**
- * Caps a prepared request to a single, non-streaming completion token.
+ * Caps a prepared request to a minimal, non-streaming completion.
  * @param {string} endpoint Backend generation endpoint.
  * @param {object} payload Prepared generation payload.
  * @returns {object} Cloned and capped payload.
  */
 function capKeepalivePayload(endpoint, payload) {
     const capped = structuredClone(payload);
+    const isChatCompletion = endpoint === '/api/backends/chat-completions/generate';
+    const length = isChatCompletion ? CHAT_COMPLETION_KEEPALIVE_LENGTH : KEEPALIVE_RESPONSE_LENGTH;
     capped.stream = false;
     for (const key of ['max_tokens', 'max_completion_tokens', 'max_length', 'max_new_tokens', 'n_predict']) {
         if (Object.hasOwn(capped, key)) {
-            capped[key] = KEEPALIVE_RESPONSE_LENGTH;
+            capped[key] = length;
         }
     }
-    if (endpoint === '/api/backends/chat-completions/generate'
+    if (isChatCompletion
         && !Object.hasOwn(capped, 'max_tokens')
         && !Object.hasOwn(capped, 'max_completion_tokens')) {
-        capped.max_tokens = KEEPALIVE_RESPONSE_LENGTH;
+        capped.max_tokens = length;
     }
     if (Object.hasOwn(capped, 'n')) {
         capped.n = 1;

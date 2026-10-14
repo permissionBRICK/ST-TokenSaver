@@ -7,7 +7,20 @@ export const FORWARDING_BLOCK = `            if (typeof request.body.session_id 
                 bodyParams['session_id'] = request.body.session_id;
             }
 
+            if (typeof request.body.prompt_cache_key === 'string' && request.body.prompt_cache_key.length <= 256) {
+                bodyParams['prompt_cache_key'] = request.body.prompt_cache_key;
+            }
+
 `;
+
+// Earlier releases forwarded only the session ID. Installing over one of these replaces it in place.
+const LEGACY_FORWARDING_BLOCKS = [
+    `            if (typeof request.body.session_id === 'string' && request.body.session_id.length <= 256) {
+                bodyParams['session_id'] = request.body.session_id;
+            }
+
+`,
+];
 
 const MARKER = "bodyParams['session_id'] = request.body.session_id";
 const GENERATE_ROUTE = "router.post('/generate'";
@@ -53,13 +66,33 @@ export function installForwarding(root, { backup = true } = {}) {
     return { changed: true, target, backup: backupPath };
 }
 
+/**
+ * @param {string} source Backend source.
+ * @returns {boolean} Whether the current forwarding block is installed.
+ */
 export function hasForwarding(source) {
+    return source.includes(FORWARDING_BLOCK);
+}
+
+/**
+ * @param {string} source Backend source.
+ * @returns {boolean} Whether any release's forwarding block, current or legacy, is installed.
+ */
+export function hasAnyForwarding(source) {
     return source.includes(MARKER);
 }
 
 export function applyForwarding(source) {
     if (hasForwarding(source)) {
         return source;
+    }
+
+    const legacy = LEGACY_FORWARDING_BLOCKS.find(block => source.includes(block));
+    if (legacy) {
+        return source.replace(legacy, FORWARDING_BLOCK);
+    }
+    if (hasAnyForwarding(source)) {
+        throw new Error('Session forwarding marker exists in an unknown form. Refusing to modify SillyTavern.');
     }
 
     const routeIndex = source.indexOf(GENERATE_ROUTE);
@@ -73,13 +106,14 @@ export function applyForwarding(source) {
 }
 
 export function removeForwarding(source) {
-    if (!hasForwarding(source)) {
+    if (!hasAnyForwarding(source)) {
         return source;
     }
-    if (!source.includes(FORWARDING_BLOCK)) {
+    const installed = [FORWARDING_BLOCK, ...LEGACY_FORWARDING_BLOCKS].find(block => source.includes(block));
+    if (!installed) {
         throw new Error('Session forwarding marker exists in an unknown form. Refusing to modify SillyTavern.');
     }
-    return source.replace(FORWARDING_BLOCK, '');
+    return source.replace(installed, '');
 }
 
 function usage() {
@@ -99,7 +133,8 @@ function run() {
     const source = fs.readFileSync(target, 'utf8');
     if (command === 'check') {
         const installed = hasForwarding(source);
-        console.log(installed ? 'OpenRouter session forwarding: installed' : 'OpenRouter session forwarding: missing');
+        const state = installed ? 'installed' : hasAnyForwarding(source) ? 'outdated' : 'missing';
+        console.log(`OpenRouter session forwarding: ${state}`);
         process.exitCode = installed ? 0 : 1;
         return;
     }

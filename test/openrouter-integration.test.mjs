@@ -56,3 +56,27 @@ test('installs on disk atomically, backs up once, and remains idempotent', () =>
     assert.equal(fs.readFileSync(`${target}.token-saver.bak`, 'utf8'), compatibleSource);
     assert.deepEqual(fs.readdirSync(backendDirectory).filter(name => name.includes('.tmp-')), []);
 });
+
+test('upgrades a legacy session-only block in place and can remove either form', () => {
+    const legacyBlock = `            if (typeof request.body.session_id === 'string' && request.body.session_id.length <= 256) {
+                bodyParams['session_id'] = request.body.session_id;
+            }
+
+`;
+    const anchor = '            if (request.body.min_p !== undefined) {';
+    const legacy = compatibleSource.replace(anchor, legacyBlock + anchor);
+    assert.equal(hasForwarding(legacy), false);
+
+    const upgraded = applyForwarding(legacy);
+    assert.equal(hasForwarding(upgraded), true);
+    assert.equal(upgraded, applyForwarding(compatibleSource));
+    assert.match(upgraded, /bodyParams\['prompt_cache_key'\] = request\.body\.prompt_cache_key/);
+    assert.equal(removeForwarding(legacy), compatibleSource);
+});
+
+test('refuses to upgrade a session block it does not recognize', () => {
+    const anchor = '            if (request.body.min_p !== undefined) {';
+    const edited = compatibleSource.replace(anchor, "            bodyParams['session_id'] = request.body.session_id;\n" + anchor);
+    assert.throws(() => applyForwarding(edited), /unknown form/);
+    assert.throws(() => removeForwarding(edited), /unknown form/);
+});

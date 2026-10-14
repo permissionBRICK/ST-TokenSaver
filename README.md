@@ -1,10 +1,10 @@
 # ST-TokenSaver
 
-Pins each OpenRouter chat to a stable session, enables a server-timed one-token keepalive roughly every five minutes, and documents SillyTavern's Anthropic prompt-cache settings so all three cost-saving layers work together.
+Pins each OpenRouter chat to a stable session, enables a server-timed minimal keepalive roughly every five minutes, and documents SillyTavern's Anthropic prompt-cache settings so all three cost-saving layers work together.
 
-The backend keeps a timer after every successful chat, and if no new message has been sent after the interval, it automatically sends a request to the API capped at max 1 token, just enough to refresh the cache timer for the price of your input tokens at reduced cache prices, plus 1 output token, meaning you only pay 10% on your next message instead of the full input token price.
+The backend keeps a timer after every successful chat, and if no new message has been sent after the interval, it automatically sends a request to the API capped at 16 output tokens (the smallest limit every chat-completion provider accepts; text-completion backends get 1), just enough to refresh the cache timer for the price of your input tokens at reduced cache prices, plus a few output tokens, meaning you only pay 10% on your next message instead of the full input token price.
 
-For OpenRouter, the UI also hashes SillyTavern's local chat ID into a stable `session_id`. This avoids exposing a chat filename while letting OpenRouter keep that conversation on the same provider endpoint from its first successful request. SillyTavern 1.18 does not forward this field, so the server plugin automatically installs a minimal, auditable one-block integration at startup.
+For OpenRouter, the UI also hashes SillyTavern's local chat ID into a stable `session_id`. This avoids exposing a chat filename while letting OpenRouter keep that conversation on the same provider endpoint from its first successful request. The same value goes out as `prompt_cache_key`, which providers with OpenAI-style caching use to send the chat to the same cache. SillyTavern does not forward either field, so the server plugin automatically installs a minimal, auditable one-block integration at startup (and upgrades the session-only block of earlier releases).
 
 ## Install
 
@@ -46,7 +46,7 @@ This single repository is intentionally installed in both supported SillyTavern 
 
    The installer is idempotent, refuses unknown source layouts, writes atomically, and keeps a `.token-saver.bak` backup. Set `TOKEN_SAVER_AUTO_PATCH=false` to disable Docker automatic installation or `TOKEN_SAVER_AUTO_RESTART=false` to require a manual Docker restart.
 
-5. Enable **Token Saver** in extension settings. Leave **Pin each OpenRouter chat** enabled and use a 280-second interval for the default five-minute cache. Every connection profile defaults to keepalive on; use the per-profile selector only to opt out when you know a profile cannot benefit or you do not want its extra one-token requests.
+5. Enable **Token Saver** in extension settings. Leave **Pin each OpenRouter chat** enabled and use a 280-second interval for the default five-minute cache. Every connection profile defaults to keepalive on; use the per-profile selector only to opt out when you know a profile cannot benefit or you do not want its extra keepalive requests.
 
 Requires SillyTavern 1.18.0+.
 
@@ -59,6 +59,13 @@ Just mathematically, as long as your pauses are between 5 and 40 minutes, this p
 If you want to optimize, try to find the sweetspot you can set the keepalive at just below 300, that still makes openrouter show the cached input tokens in the logs with every request using anthropic (some of the most aggressive ones in terms of cache, also the most expensive). Usually, somewhere between 270-290 works consistently for me.
 
 Aside from that, if you are using Models that have more than one provider, the session id pinning helps in avoiding cache misses by in theory stopping openrouter from randomly switching providers mid-session (independantly of how often you send messages), so this alone also helps reduce costs there.
+
+## Provider notes
+
+Measured through OpenRouter in October 2026:
+
+- **Gemini** caches implicitly; no SillyTavern cache setting is needed. OpenRouter moves *every* system message into Gemini's system instruction, so a system message that changes each turn after the chat history (Author's Note, an at-depth lorebook entry, an extension injection) moves the start of the prompt and every request misses. Set **Prompt Post-Processing** to **Semi-strict** in Gemini connection profiles. Mid-chat system messages are then sent as user messages, stay where they were placed, and the shared prefix caches (about 90% of a 23k-token prompt).
+- **Meta Muse** caches automatically too, but only reliably with `prompt_cache_key`: identical replays hit about 30% of the time without it and every time with it. It also rejects `max_tokens` below 16, which is why chat-completion keepalives request 16 tokens.
 
 ## Development
 
