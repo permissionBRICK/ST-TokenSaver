@@ -41,8 +41,13 @@ const MAIN_CHAT_GENERATION_TYPES = new Set(['normal', 'regenerate', 'swipe', 'co
 // Extension-prompt key used to inject the keepalive message as a USER message at depth 0.
 const KEEPALIVE_INJECT_ID = 'keepalive_ping';
 
-// Original default message; used to migrate untouched installs to the current default wording.
-const LEGACY_DEFAULT_MESSAGE = 'Keep the cache warm.';
+// Earlier default messages; untouched installs migrate to the current default.
+const LEGACY_DEFAULT_MESSAGES = new Set([
+    'Keep the cache warm.',
+    '[Note: just reply with an empty response to keep the session alive]',
+]);
+// Must match CACHE_MISS_STOP in server/index.mjs.
+const CACHE_MISS_STOP = 'cache-misses';
 
 // Idle-tracking key used when no connection profile is active (manual API panel).
 const NONE_KEY = '__none__';
@@ -51,7 +56,9 @@ const defaultSettings = {
     enabled: false,
     openRouterSessionIds: true,
     timeoutSeconds: 295,
-    message: '[Note: just reply with an empty response to keep the session alive]',
+    // Gemini only reuses a keepalive's cache entry for a later prompt at least as long as the
+    // keepalive, so the ping has to be shorter than any real reply the user might send.
+    message: '.',
     // Per-profile enable map: { [profileId]: boolean }. Unlisted profiles default to enabled.
     profiles: {},
 };
@@ -68,6 +75,9 @@ let lifecycleVersion = 0;
 let temporaryConnectionDepth = 0;
 let refreshAfterTemporaryConnection = false;
 let activeMainRequest = null;
+// Successful main-chat requests in this tab. The server keeps a job stopped for cache misses until
+// a registration reports a higher count, i.e. a real message was sent after the stop.
+let activityCount = 0;
 let generationWatchdog = null;
 let latestSuccessfulRequestStartedAt = 0;
 // Whether keepalive is "armed" for the CURRENT chat. It stays dormant until the user sends a new
@@ -113,6 +123,24 @@ function isKeepaliveEnabledForActive() {
 
 function getTimeoutMs() {
     return Math.max(60, Number(extension_settings[MODULE].timeoutSeconds) || 295) * 1000;
+}
+
+// Gemini drops a fresh implicit-cache entry within a minute or two unless it is read again, but
+// keeps an entry that was re-read for more than seven minutes (measured on Gemini 4 Argon through
+// OpenRouter). It gets an early first keepalive and a longer interval instead of the setting.
+const GEMINI_SCHEDULE = Object.freeze({ firstDelayMs: 45 * 1000, intervalMs: 420 * 1000 });
+
+/**
+ * When keepalives are due for the active connection: the first one after a real message, then
+ * each later one after the previous keepalive.
+ * @returns {{firstDelayMs: number, intervalMs: number}}
+ */
+function getKeepaliveSchedule() {
+    if (main_api === 'openai' && /gemini/i.test(String(getChatCompletionModel(oai_settings) || ''))) {
+        return GEMINI_SCHEDULE;
+    }
+    const intervalMs = getTimeoutMs();
+    return { firstDelayMs: intervalMs, intervalMs };
 }
 
 function updateLastKeepalive(profileKey, value) {
@@ -163,7 +191,7 @@ function getLastWarmTime(profileKey = getActiveProfileKey()) {
 
 function isWarmPromptExpired(profileKey = getActiveProfileKey()) {
     const lastWarmTime = getLastWarmTime(profileKey);
-    return lastWarmTime > 0 && (Date.now() - lastWarmTime) >= getTimeoutMs();
+    return lastWarmTime > 0 && (Date.now() - lastWarmTime) >= getKeepaliveSchedule().intervalMs;
 }
 
 function disarmExpiredJob() {
@@ -221,6 +249,11 @@ async function sendBackendHeartbeat() {
         updateLastKeepalive(profileKey, state.lastRun);
         if (response.status === 404) {
             jobRegistered = false;
+            if (state.reason === CACHE_MISS_STOP) {
+                console.info('[Keepalive] Stopped until the next message: the provider did not keep this prompt cached');
+                disarmExpiredJob();
+                return;
+            }
             if (isWarmPromptExpired(profileKey)) {
                 disarmExpiredJob();
                 return;
@@ -391,18 +424,27 @@ async function registerBackendJob() {
         if (version !== lifecycleVersion || !armed || !isKeepaliveEnabledForActive()) {
             return;
         }
-        const timeoutMs = getTimeoutMs();
-        const last = getLastWarmTime(profileKey) || Date.now();
-        const remaining = timeoutMs - (Date.now() - last);
-        if (remaining <= 0) {
+        const { firstDelayMs, intervalMs } = getKeepaliveSchedule();
+        const activityAt = lastActivity[profileKey] || 0;
+        const keepaliveAt = lastKeepalive[profileKey] || 0;
+        const now = Date.now();
+        if (now - Math.max(activityAt, keepaliveAt) >= intervalMs) {
             disarmExpiredJob();
             return;
         }
+        const nextAt = keepaliveAt > activityAt ? keepaliveAt + intervalMs : activityAt + firstDelayMs;
         const response = await postKeepaliveBackend('register', {
             ...request,
-            intervalMs: timeoutMs,
-            delayMs: remaining,
+            intervalMs,
+            firstDelayMs,
+            delayMs: Math.max(0, nextAt - now),
+            activityCount,
         });
+        if (response.status === 409) {
+            console.info('[Keepalive] Stays stopped until the next message: the provider did not keep this prompt cached');
+            disarmExpiredJob();
+            return;
+        }
         if (!response.ok) {
             throw new Error(`HTTP ${response.status}`);
         }
@@ -521,9 +563,9 @@ function loadSettings() {
         extension_settings[MODULE].profiles = {};
     }
 
-    // Migrate the original default message to the current default so installs that never
-    // customized it pick up the improved wording (custom messages are left untouched).
-    if (extension_settings[MODULE].message === LEGACY_DEFAULT_MESSAGE) {
+    // Migrate earlier default messages so installs that never customized it pick up the current
+    // default (custom messages are left untouched).
+    if (LEGACY_DEFAULT_MESSAGES.has(extension_settings[MODULE].message)) {
         extension_settings[MODULE].message = defaultSettings.message;
         saveSettingsDebounced();
     }
@@ -660,6 +702,7 @@ async function finishForegroundRequest(success) {
         lastActivity[activeRequest.profileKey] = Math.max(lastActivity[activeRequest.profileKey] || 0, startedAt);
         latestSuccessfulRequestStartedAt = Math.max(latestSuccessfulRequestStartedAt, startedAt);
         armed = true;
+        activityCount++;
     }
 
     const successfulStartedAt = latestSuccessfulRequestStartedAt || null;

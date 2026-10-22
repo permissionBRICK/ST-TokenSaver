@@ -65,6 +65,10 @@ const ALLOWED_ENDPOINTS = new Set([
     '/api/horde/generate-text',
 ]);
 const localHttpsAgent = new https.Agent({ rejectUnauthorized: false });
+// Gemini on Vertex keeps some chats cached and silently drops others, and a keepalive that misses
+// costs the full input price. Two misses between real messages stop the job until the next one.
+export const MAX_IDLE_CACHE_MISSES = 2;
+export const CACHE_MISS_STOP = 'cache-misses';
 
 function advanceDeadline(deadline, interval, now) {
     if (deadline > now) {
@@ -101,6 +105,16 @@ export class KeepaliveScheduler {
     register(key, job) {
         const now = this.#now();
         this.#pruneExpiredJobs(now);
+        // A job stopped for cache misses stays stopped until the tab reports a newer real message.
+        // Registrations without an activity count come from older frontends and keep working.
+        const stopped = this.#expiredJobs.get(key);
+        const activityCount = Number(job.activityCount);
+        if (stopped?.reason === CACHE_MISS_STOP
+            && Number.isFinite(activityCount)
+            && Number.isFinite(stopped.activityCount)
+            && activityCount <= stopped.activityCount) {
+            return null;
+        }
         this.#expiredJobs.delete(key);
         const existing = this.#jobs.get(key);
         const intervalMs = Math.min(MAX_INTERVAL_MS, Math.max(MIN_INTERVAL_MS, Number(job.intervalMs) || MIN_INTERVAL_MS));
@@ -109,12 +123,21 @@ export class KeepaliveScheduler {
             ? Math.min(intervalMs, Math.max(0, requestedDelay))
             : intervalMs;
         const requestedNextRun = now + delayMs;
+        // The first keepalive after a real message may be due sooner than the interval (Gemini).
+        const requestedFirstDelay = Number(job.firstDelayMs);
+        const firstDelayMs = Number.isFinite(requestedFirstDelay)
+            ? Math.min(intervalMs, Math.max(0, requestedFirstDelay))
+            : intervalMs;
         if (existing) {
+            if (activityCount > Number(existing.activityCount)) {
+                this.#startIdlePeriod(existing);
+            }
             // Re-registering updates the replay payload, but cannot claim that the provider cache
             // was refreshed. Mutate the existing object so an in-flight dispatch can still clear
             // its state, while preserving an earlier deadline and any foreground-request pause.
             Object.assign(existing, job, {
                 intervalMs,
+                firstDelayMs,
                 failures: 0,
                 lastSeen: now,
                 nextRun: Math.min(existing.nextRun, requestedNextRun),
@@ -123,11 +146,14 @@ export class KeepaliveScheduler {
             this.#jobs.set(key, {
                 ...job,
                 intervalMs,
+                firstDelayMs,
                 lastSeen: now,
                 nextRun: requestedNextRun,
                 inFlight: false,
                 paused: false,
                 lastRun: null,
+                cacheMisses: 0,
+                idlePeriod: 0,
             });
         }
         this.#schedule();
@@ -174,7 +200,8 @@ export class KeepaliveScheduler {
         job.paused = false;
         const elapsedMs = Number(activityElapsedMs);
         if (activityElapsedMs !== null && activityElapsedMs !== undefined && Number.isFinite(elapsedMs) && elapsedMs >= 0) {
-            job.nextRun = now + Math.max(0, job.intervalMs - elapsedMs);
+            job.nextRun = now + Math.max(0, job.firstDelayMs - elapsedMs);
+            this.#startIdlePeriod(job);
         }
         this.#schedule();
         return job;
@@ -210,8 +237,9 @@ export class KeepaliveScheduler {
                 continue;
             }
             const scheduledRun = job.nextRun;
+            const idlePeriod = job.idlePeriod;
             job.inFlight = true;
-            pending.push(Promise.resolve(this.#dispatch(job)).then(() => {
+            pending.push(Promise.resolve(this.#dispatch(job)).then(usage => {
                 job.failures = 0;
                 const completedAt = this.#now();
                 job.lastRun = completedAt;
@@ -219,6 +247,15 @@ export class KeepaliveScheduler {
                 const expiredJob = this.#expiredJobs.get(key);
                 if (expiredJob) {
                     expiredJob.lastRun = completedAt;
+                }
+                // A real message sent while this keepalive was in flight starts a new idle period.
+                if (isCacheMiss(usage) && job.idlePeriod === idlePeriod) {
+                    job.cacheMisses++;
+                    console.info(`[Keepalive] Job ${job.id} read ${usage.cachedTokens} of ${usage.promptTokens} prompt tokens from cache (miss ${job.cacheMisses} of ${MAX_IDLE_CACHE_MISSES})`);
+                    if (job.cacheMisses >= MAX_IDLE_CACHE_MISSES && this.#jobs.get(key) === job) {
+                        console.info(`[Keepalive] Stopped job ${job.id} until the next message: the provider is not keeping this prompt cached`);
+                        this.#expire(key, job, completedAt, CACHE_MISS_STOP);
+                    }
                 }
             }).catch(error => {
                 // A provider that rejects the keepalive outright (e.g. an unsupported parameter)
@@ -236,14 +273,21 @@ export class KeepaliveScheduler {
         await Promise.all(pending);
     }
 
-    #expire(key, job, now) {
+    #expire(key, job, now, reason = 'lease') {
         this.#jobs.delete(key);
         this.#expiredJobs.set(key, {
             expiredAt: now,
             intervalMs: job.intervalMs,
             lastRun: job.lastRun,
+            reason,
+            activityCount: Number(job.activityCount),
         });
         this.#pruneExpiredJobs(now);
+    }
+
+    #startIdlePeriod(job) {
+        job.cacheMisses = 0;
+        job.idlePeriod = (job.idlePeriod || 0) + 1;
     }
 
     #pruneExpiredJobs(now) {
@@ -299,6 +343,39 @@ export function getResponseError(body) {
     return typeof error === 'object' ? String(error.message || JSON.stringify(error)) : String(error === true ? 'unknown error' : error);
 }
 
+/**
+ * Reads prompt-cache usage from an OpenAI-compatible response (OpenRouter, OpenAI, DeepSeek, ...).
+ * SillyTavern strips usage from direct Claude and Gemini responses, so those return null, as do
+ * providers that report no cache figures. Unknown usage never counts as a cache miss.
+ * @param {string} body Response body.
+ * @returns {{promptTokens: number, cachedTokens: number}|null}
+ */
+export function getCacheUsage(body) {
+    let data;
+    try {
+        data = JSON.parse(body);
+    } catch {
+        return null;
+    }
+    const usage = data?.usage;
+    const promptTokens = Number(usage?.prompt_tokens);
+    const cachedTokens = Number(usage?.prompt_tokens_details?.cached_tokens ?? usage?.prompt_cache_hit_tokens);
+    if (!Number.isFinite(promptTokens) || promptTokens <= 0 || !Number.isFinite(cachedTokens)) {
+        return null;
+    }
+    return { promptTokens, cachedTokens };
+}
+
+/**
+ * A keepalive misses when it read less than half of its prompt from cache. A hit that only reaches
+ * the shared system prompt or preset is a miss for the chat itself.
+ * @param {{promptTokens: number, cachedTokens: number}|null|undefined} usage
+ * @returns {boolean}
+ */
+export function isCacheMiss(usage) {
+    return !!usage && usage.cachedTokens * 2 < usage.promptTokens;
+}
+
 async function dispatchKeepaliveRequest(job) {
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(new Error('Keepalive request timed out')), 120000);
@@ -323,6 +400,7 @@ async function dispatchKeepaliveRequest(job) {
             throw new Error(`Provider rejected the keepalive: ${error}`);
         }
         console.info(`[Keepalive] Job ${job.id} completed successfully`);
+        return getCacheUsage(body);
     } finally {
         clearTimeout(timeout);
     }
@@ -392,8 +470,13 @@ apiRouter.post('/register', (request, response) => {
             payload: request.body.payload,
             intervalMs: request.body.intervalMs,
             delayMs: request.body.delayMs,
+            firstDelayMs: request.body.firstDelayMs,
+            activityCount: request.body.activityCount,
             request: getReplayRequest(request),
         });
+        if (!job) {
+            return response.status(409).send({ stopped: CACHE_MISS_STOP });
+        }
         console.info(`[Keepalive] Registered job ${id}; first run in ${job.nextRun - Date.now()}ms, interval ${job.intervalMs}ms`);
         return response.send({ ok: true, nextRun: job.nextRun, leaseMs: FRONTEND_LEASE_MS });
     } catch (error) {
@@ -411,6 +494,7 @@ apiRouter.post('/heartbeat', (request, response) => {
             return response.status(404).send({
                 expired: !!expiredJob,
                 lastRun: expiredJob?.lastRun ?? null,
+                reason: expiredJob?.reason ?? null,
             });
         }
         return response.send({ ok: true, nextRun: job.nextRun, lastRun: job.lastRun, leaseMs: FRONTEND_LEASE_MS });
@@ -442,6 +526,7 @@ apiRouter.post('/resume', (request, response) => {
             return response.status(404).send({
                 expired: !!expiredJob,
                 lastRun: expiredJob?.lastRun ?? null,
+                reason: expiredJob?.reason ?? null,
             });
         }
         const reset = request.body?.activityElapsedMs !== null && request.body?.activityElapsedMs !== undefined;
