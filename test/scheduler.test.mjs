@@ -1,6 +1,8 @@
 import assert from 'node:assert/strict';
+import http from 'node:http';
+import net from 'node:net';
 import test from 'node:test';
-import { CACHE_MISS_STOP, FRONTEND_LEASE_MS, KeepaliveScheduler, getCacheUsage, getResponseError, isCacheMiss } from '../server/index.mjs';
+import { CACHE_MISS_STOP, FRONTEND_LEASE_MS, KeepaliveScheduler, dispatchKeepaliveRequest, getCacheUsage, getResponseError, isCacheMiss } from '../server/index.mjs';
 
 function fixture(dispatch = async () => {}) {
     let now = 0;
@@ -190,4 +192,35 @@ test('without a first delay the next message waits a whole interval', () => {
     scheduler.register('u:t', { id: 't', intervalMs: 280000, delayMs: 280000 });
     setNow(100000); scheduler.pause('u:t'); scheduler.resume('u:t', 5000);
     assert.equal(scheduler.get('u:t').nextRun, 375000);
+});
+
+test('keepalives reach ST directly while the global agent goes to a request proxy', async () => {
+    const server = http.createServer((req, res) => {
+        req.resume();
+        req.on('end', () => res.end('{"usage":{"prompt_tokens":10}}'));
+    });
+    await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
+    // What SillyTavern's requestProxy does: every request on the global agent goes to the proxy,
+    // which here can't connect.
+    class DeadProxyAgent extends http.Agent {
+        createConnection() { return net.connect(1, '127.0.0.1'); }
+    }
+    const globalAgent = http.globalAgent;
+    const info = console.info;
+    try {
+        http.globalAgent = new DeadProxyAgent();
+        console.info = () => {};
+        const { port } = server.address();
+        await dispatchKeepaliveRequest({
+            id: 't',
+            endpoint: '/api/backends/chat-completions/generate',
+            payload: {},
+            request: { origin: `http://127.0.0.1:${port}`, headers: { 'Content-Type': 'application/json' }, secure: false },
+        });
+    } finally {
+        console.info = info;
+        http.globalAgent = globalAgent;
+        server.closeAllConnections();
+        server.close();
+    }
 });

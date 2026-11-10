@@ -1,5 +1,6 @@
 import express from 'express';
 import fs from 'node:fs';
+import http from 'node:http';
 import https from 'node:https';
 import path from 'node:path';
 import fetch from 'node-fetch';
@@ -64,6 +65,9 @@ const ALLOWED_ENDPOINTS = new Set([
     '/api/novelai/generate',
     '/api/horde/generate-text',
 ]);
+// Keepalives call back into this same ST, so they use their own agents. The global ones go through
+// SillyTavern's requestProxy when it is on, and a proxy can't reach ST's container address.
+const localHttpAgent = new http.Agent();
 const localHttpsAgent = new https.Agent({ rejectUnauthorized: false });
 // Gemini on Vertex keeps some chats cached and silently drops others, and a keepalive that misses
 // costs the full input price. Two misses between real messages stop the job until the next one.
@@ -376,7 +380,7 @@ export function isCacheMiss(usage) {
     return !!usage && usage.cachedTokens * 2 < usage.promptTokens;
 }
 
-async function dispatchKeepaliveRequest(job) {
+export async function dispatchKeepaliveRequest(job) {
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(new Error('Keepalive request timed out')), 120000);
     timeout.unref?.();
@@ -387,7 +391,7 @@ async function dispatchKeepaliveRequest(job) {
             headers: job.request.headers,
             body: JSON.stringify(job.payload),
             signal: controller.signal,
-            agent: job.request.secure ? localHttpsAgent : undefined,
+            agent: job.request.secure ? localHttpsAgent : localHttpAgent,
         });
         const body = await response.text();
         if (!response.ok) {
