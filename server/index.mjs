@@ -73,6 +73,11 @@ const localHttpsAgent = new https.Agent({ rejectUnauthorized: false });
 // costs the full input price. Two misses between real messages stop the job until the next one.
 export const MAX_IDLE_CACHE_MISSES = 2;
 export const CACHE_MISS_STOP = 'cache-misses';
+// After a real message the tab re-registers the chat with its new reply, which takes a moment after
+// the request finishes. A keepalive due by then (a reply slower than the Gemini first delay) waits
+// for that prompt: the previous one is shorter than the new message and cannot read its cache entry.
+// The old prompt goes out if the tab sends nothing in this time.
+export const PAYLOAD_WAIT_MS = 2 * 60 * 1000;
 
 function advanceDeadline(deadline, interval, now) {
     if (deadline > now) {
@@ -145,6 +150,7 @@ export class KeepaliveScheduler {
                 failures: 0,
                 lastSeen: now,
                 nextRun: Math.min(existing.nextRun, requestedNextRun),
+                payloadWaitUntil: 0,
             });
         } else {
             this.#jobs.set(key, {
@@ -155,6 +161,7 @@ export class KeepaliveScheduler {
                 nextRun: requestedNextRun,
                 inFlight: false,
                 paused: false,
+                payloadWaitUntil: 0,
                 lastRun: null,
                 cacheMisses: 0,
                 idlePeriod: 0,
@@ -205,6 +212,7 @@ export class KeepaliveScheduler {
         const elapsedMs = Number(activityElapsedMs);
         if (activityElapsedMs !== null && activityElapsedMs !== undefined && Number.isFinite(elapsedMs) && elapsedMs >= 0) {
             job.nextRun = now + Math.max(0, job.firstDelayMs - elapsedMs);
+            job.payloadWaitUntil = now + PAYLOAD_WAIT_MS;
             this.#startIdlePeriod(job);
         }
         this.#schedule();
@@ -237,8 +245,12 @@ export class KeepaliveScheduler {
             if (job.nextRun > now) {
                 continue;
             }
-            if (job.inFlight || job.paused) {
+            if (job.inFlight || job.paused || job.payloadWaitUntil > now) {
                 continue;
+            }
+            if (job.payloadWaitUntil) {
+                job.payloadWaitUntil = 0;
+                console.info(`[Keepalive] Job ${job.id} got no prompt with the new reply; sending the previous one`);
             }
             const scheduledRun = job.nextRun;
             const idlePeriod = job.idlePeriod;
@@ -316,7 +328,7 @@ export class KeepaliveScheduler {
 
         let nextWake = Infinity;
         for (const job of this.#jobs.values()) {
-            const nextRun = (job.inFlight || job.paused) ? Infinity : job.nextRun;
+            const nextRun = (job.inFlight || job.paused) ? Infinity : Math.max(job.nextRun, job.payloadWaitUntil || 0);
             nextWake = Math.min(nextWake, nextRun, job.lastSeen + FRONTEND_LEASE_MS);
         }
         const delay = Math.max(0, nextWake - this.#now());
